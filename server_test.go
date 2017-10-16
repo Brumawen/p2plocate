@@ -40,12 +40,20 @@ func TestServerCanDetectOtherDevices(t *testing.T) {
 		ClientID:  "2",
 		Functions: []string{"Function1", "Function2"},
 	}
+	a := false
+	s1.OnDiscover(func() {
+		a = true
+	})
 	s1.Start()
 
 	time.Sleep(2 * time.Second)
+
 	s2.Discover()
 	time.Sleep(1 * time.Second)
 
+	if !a {
+		t.Error("OnDiscover func was not called.")
+	}
 	if len(s1.Devices) != 1 {
 		t.Error("S1 failed to discover S2")
 	}

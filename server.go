@@ -26,6 +26,9 @@ type P2PServer struct {
 	stopFlag  chan bool
 
 	localAddresses []string
+
+	discoverFunc func()
+	t            *time.Timer
 }
 
 // Discover ...
@@ -108,15 +111,10 @@ func (s *P2PServer) Start() error {
 		}()
 
 		// Block until we get a signal to stop
-		select {
-		case c := <-s.stopFlag:
-			{
-				if c {
-					s.IsRunning = false
-					serverCon.Close()
-				}
-			}
-		}
+		<-s.stopFlag
+		s.IsRunning = false
+		serverCon.Close()
+
 		// Send the signal that we are done
 		s.stopFlag <- true
 	}()
@@ -156,6 +154,21 @@ func (s *P2PServer) GetDevicesForFunction(function string) []Device {
 	return dl
 }
 
+// GetDevice returns the specified device, if it has been discovered
+func (s *P2PServer) GetDevice(clientID string) (bool, Device) {
+	for _, d := range s.Devices {
+		if d.ClientID == clientID {
+			return true, d
+		}
+	}
+	return false, Device{}
+}
+
+// OnDiscover allows a func to be set that will be called when a device is discovered or updated
+func (s *P2PServer) OnDiscover(f func()) {
+	s.discoverFunc = f
+}
+
 func (s *P2PServer) sendMsg(m Msg) error {
 	serverAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("255.255.255.255:%d", s.PortNo))
 	if err != nil {
@@ -193,13 +206,29 @@ func (s *P2PServer) handleMsg(buf []byte, addr *net.UDPAddr) {
 			if s.ClientID == m.ClientID {
 				// This message came from us, so we can ignore it
 			} else {
-				d := Device{
-					ClientID:   m.ClientID,
-					Functions:  m.Functions,
-					IPAddress:  addr.String(),
-					Discovered: time.Now(),
+				exists, d := s.GetDevice(m.ClientID)
+				if exists {
+					d.Functions = m.Functions
+					d.IPAddress = addr.String()
+					d.Discovered = time.Now()
+				} else {
+					d := Device{
+						ClientID:   m.ClientID,
+						Functions:  m.Functions,
+						IPAddress:  addr.String(),
+						Discovered: time.Now(),
+					}
+					s.Devices = append(s.Devices, d)
+
+					if s.t == nil {
+						s.t = time.AfterFunc(500*time.Millisecond, func() {
+							s.discoverFunc()
+							s.Discover()
+						})
+					} else {
+						s.t.Reset(500 * time.Millisecond)
+					}
 				}
-				s.Devices = append(s.Devices, d)
 			}
 			break
 		default:
