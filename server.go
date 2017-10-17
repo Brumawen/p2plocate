@@ -242,7 +242,6 @@ func (s *P2PServer) handleMsg(buf []byte, addr *net.UDPAddr) {
 						s.t.Reset(500 * time.Millisecond)
 					}
 				}
-
 			}
 			break
 		default:
