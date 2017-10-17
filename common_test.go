@@ -23,3 +23,8 @@ func TestCanGetNetworkInterfaces(t *testing.T) {
 	}
 
 }
+
+func TestCanGetBroadcastAddress(t *testing.T) {
+	b := GetBroadcastAddress("192.168.1.1")
+	fmt.Println(b)
+}

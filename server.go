@@ -1,3 +1,6 @@
+// Package p2plocate is a peer to peer discovery tool that uses UDP broadcasts on the local network to
+// discover services running on other computers within that network and to determine what
+// functions those services support.
 package p2plocate
 
 import (
@@ -5,14 +8,15 @@ import (
 	"log"
 	"net"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
-// P2PServer ...
-// Peer discovery server.
-// Used to locate other devices and determine their functions.
+// P2PServer is used to locate services running on other devices and determine their functions.
 type P2PServer struct {
-	PortNo   int
-	ClientID string
+	PortNo        int
+	ClientID      string
+	BroadcastAddr string
 
 	IsRunning      bool
 	LastDiscoverOK bool
@@ -25,12 +29,12 @@ type P2PServer struct {
 	startFlag chan bool
 	stopFlag  chan bool
 
-	localAddresses []string
+	discoverFunc func()
+	t            *time.Timer
 }
 
-// Discover ...
-// Broadcasts a discovery message and rebuilds the list of devices from the
-// replies recieved from the other devices on the local network
+// Discover broadcasts a discovery message and rebuilds the list of devices from the
+// replies received from the other devices on the local network
 func (s *P2PServer) Discover() error {
 	req := Msg{
 		MsgType:   "Discover",
@@ -39,11 +43,11 @@ func (s *P2PServer) Discover() error {
 		Data:      "",
 	}
 	log.Println("Sending Discover Message.")
+	s.LastDiscover = time.Now()
 	return s.sendMsg(req)
 }
 
-// Start ...
-// Starts the Server Listening for broadcasts from clients
+// Start starts listening for broadcasted messages from other devices.
 func (s *P2PServer) Start() error {
 	if s.IsRunning {
 		return nil
@@ -52,34 +56,21 @@ func (s *P2PServer) Start() error {
 	if s.ClientID == "" {
 		s.ClientID = GetClientID()
 	}
-	l, err := GetLocalIPAddresses()
-	if err != nil {
-		return err
-	}
-	s.localAddresses = l
-
-	serverAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", s.PortNo))
-	if err != nil {
-		s.LastError = err
-		return err
-	}
+	s.BroadcastAddr = GetLocalBroadcastAddress()
 
 	s.IsRunning = true
 	s.stopFlag = make(chan bool)
 	s.startFlag = make(chan bool)
 
 	go func() {
-
-		// Start Listening to the port
 		log.Println("Listening for device messages on UDP port", s.PortNo)
-		serverCon, err := net.ListenUDP("udp", serverAddr)
+		serverCon, err := listenUDP(s.PortNo)
 		if err != nil {
 			s.LastError = err
 			s.IsRunning = false
-			<-s.startFlag
+			s.startFlag <- true
 			return
 		}
-		defer serverCon.Close()
 
 		go func() {
 			// Send a signal to all devices to reveal themselves
@@ -108,15 +99,10 @@ func (s *P2PServer) Start() error {
 		}()
 
 		// Block until we get a signal to stop
-		select {
-		case c := <-s.stopFlag:
-			{
-				if c {
-					s.IsRunning = false
-					serverCon.Close()
-				}
-			}
-		}
+		<-s.stopFlag
+		s.IsRunning = false
+		serverCon.Close()
+
 		// Send the signal that we are done
 		s.stopFlag <- true
 	}()
@@ -127,8 +113,7 @@ func (s *P2PServer) Start() error {
 	return s.LastError
 }
 
-// Stop ...
-// Stops the server
+// Stop stops listening for broadcasted messages from other devices.
 func (s *P2PServer) Stop() {
 	if !s.IsRunning {
 		return
@@ -142,8 +127,7 @@ func (s *P2PServer) Stop() {
 	}
 }
 
-// GetDevicesForFunction ...
-// Returns a list of devices that offer the specified function
+// GetDevicesForFunction returns a list of devices that offer the specified function.
 func (s *P2PServer) GetDevicesForFunction(function string) []Device {
 	dl := []Device{}
 
@@ -156,29 +140,69 @@ func (s *P2PServer) GetDevicesForFunction(function string) []Device {
 	return dl
 }
 
+// GetDevice returns the specified device, if it has been discovered.
+func (s *P2PServer) GetDevice(clientID string) (bool, Device) {
+	for _, d := range s.Devices {
+		if d.ClientID == clientID {
+			return true, d
+		}
+	}
+	return false, Device{}
+}
+
+// OnDiscover allows a func to be set that will be called when a device is discovered or updated
+func (s *P2PServer) OnDiscover(f func()) {
+	s.discoverFunc = f
+}
+
+// sendMsg broadcasts the message to all the devices listening on the network
 func (s *P2PServer) sendMsg(m Msg) error {
-	serverAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("255.255.255.255:%d", s.PortNo))
-	if err != nil {
-		return err
+	if s.BroadcastAddr == "" {
+		s.BroadcastAddr = GetLocalBroadcastAddress()
 	}
-	localAddr, err := net.ResolveUDPAddr("udp", ":0")
+	conn, err := dialUDP(s.BroadcastAddr, s.PortNo)
 	if err != nil {
-		return err
-	}
-	conn, err := net.DialUDP("udp", localAddr, serverAddr)
-	if err != nil {
-		return err
+		return errors.Wrap(err, "dialUDP")
 	}
 	defer conn.Close()
 
 	j, err := m.ToJSON()
 	if err != nil {
-		return err
+		return errors.Wrap(err, "ToJSON")
 	}
 	_, err = conn.Write(j)
-	return err
+	return errors.Wrap(err, "Write")
 }
 
+// listenUDP returns a UDP connection that is set up to listen for messages on the specified port number.
+func listenUDP(portno int) (*net.UDPConn, error) {
+	serverAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", portno))
+	if err != nil {
+		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
+	}
+	// Start Listening to the port
+	conn, err := net.ListenUDP("udp", serverAddr)
+	if err != nil {
+		return nil, errors.Wrap(err, "net.ListenUDP")
+	}
+	return conn, nil
+}
+
+// dialUDP returns a UDP connection that can be used to broadcast messages.
+func dialUDP(addr string, portno int) (*net.UDPConn, error) {
+	serverAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", addr, portno))
+	if err != nil {
+		return nil, errors.Wrap(err, "net.ResolveUDPAddr")
+	}
+	log.Println("ServerAddr is", serverAddr.String())
+	conn, err := net.DialUDP("udp", nil, serverAddr)
+	if err != nil {
+		return nil, errors.Wrap(err, "net.DialUDP")
+	}
+	return conn, nil
+}
+
+// handleMsg handles a message that has been received.
 func (s *P2PServer) handleMsg(buf []byte, addr *net.UDPAddr) {
 	m := Msg{}
 	err := m.FromJSON(buf)
@@ -188,18 +212,37 @@ func (s *P2PServer) handleMsg(buf []byte, addr *net.UDPAddr) {
 		switch m.MsgType {
 		case "Discover":
 			log.Println("Discover message received from", m.ClientID, addr.String())
-			s.LastDiscover = time.Now()
-			s.LastDiscoverOK = true
 			if s.ClientID == m.ClientID {
 				// This message came from us, so we can ignore it
+				s.LastDiscoverOK = true
+
+				// Remove old devices
+
 			} else {
-				d := Device{
-					ClientID:   m.ClientID,
-					Functions:  m.Functions,
-					IPAddress:  addr.String(),
-					Discovered: time.Now(),
+				exists, d := s.GetDevice(m.ClientID)
+				if exists {
+					d.Functions = m.Functions
+					d.IPAddress = addr.String()
+					d.Discovered = time.Now()
+				} else {
+					d := Device{
+						ClientID:   m.ClientID,
+						Functions:  m.Functions,
+						IPAddress:  addr.String(),
+						Discovered: time.Now(),
+					}
+					s.Devices = append(s.Devices, d)
+
+					if s.t == nil {
+						s.t = time.AfterFunc(500*time.Millisecond, func() {
+							s.Discover()
+							s.discoverFunc()
+						})
+					} else {
+						s.t.Reset(500 * time.Millisecond)
+					}
 				}
-				s.Devices = append(s.Devices, d)
+
 			}
 			break
 		default:

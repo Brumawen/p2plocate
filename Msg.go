@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 )
 
-// MsgRequest ...
+// Msg ...
 // The structure containing the data that is sent with a broadcast message
 type Msg struct {
 	MsgType   string
